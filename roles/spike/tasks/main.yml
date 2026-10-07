@@ -1,0 +1,12 @@
+---
+- name: Resolve the remote home directory
+  ansible.builtin.command: printenv HOME
+  register: _spike_home
+  changed_when: false
+
+- name: Set the spike directory
+  ansible.builtin.set_fact:
+    spike_dir: "{{ (expkit_remote_root or (_spike_home.stdout ~ '/expkit')) }}/spike"
+
+- name: Run the requested spike phase
+  ansible.builtin.include_tasks: "{{ spike_phase }}.yml"

@@ -1,0 +1,33 @@
+namespace: felipedreis
+name: expkit
+version: 0.1.0  # must equal src/expkit/__init__.py's __version__ (tests/test_versions.py)
+readme: README.md
+authors:
+  - felipedreis (https://github.com/felipedreis)
+description: >-
+  Run declarative, pre-registered experiments on a local machine, a Raspberry Pi
+  SLURM + Docker cluster, or an HPC SLURM + Singularity cluster.
+repository: https://github.com/felipedreis/expkit
+license_file: LICENSE
+tags: [tools, experiments, slurm, hpc, singularity, reproducibility]
+dependencies:
+  ansible.posix: ">=1.5.0"
+build_ignore:
+  - .venv
+  - .git
+  - .github
+  - .claude-plugin
+  - plugin
+  - src
+  - tests
+  - docs
+  - spike-results
+  - pyproject.toml
+  - "*.tar.gz"
+  - dist
+  - .ansible
+  - .ruff_cache
+  - .pytest_cache
+  - .ansible-lint
+  - .gitignore
+  - CLAUDE.md

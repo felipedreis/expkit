@@ -1,0 +1,13 @@
+#!/bin/bash -l
+# {{ ansible_managed | default('Rendered by roles/spike, do not edit.') }}
+# One array task: probe the compute node, then sleep so the finalize job has something to wait for.
+#SBATCH --job-name=expkit_spike_cell
+#SBATCH --array=1-2
+#SBATCH --nodes=1 --ntasks=1 --cpus-per-task=1 --mem=512M --time=00:10:00
+#SBATCH --output={{ spike_dir }}/cell_%A_%a.out
+{% for opt in expkit_slurm_opts | default([]) %}
+#SBATCH {{ opt }}
+{% endfor %}
+trap 'echo $? > "{{ spike_dir }}/DONE_${SLURM_ARRAY_TASK_ID}"' EXIT
+bash "{{ spike_dir }}/probe.sh" compute > "{{ spike_dir }}/compute_${SLURM_ARRAY_TASK_ID}.json"
+sleep {{ spike_cell_sleep }}

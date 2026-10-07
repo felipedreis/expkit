@@ -1,0 +1,75 @@
+---
+# Launches every probe and returns at once: nothing here waits on the cluster, so a VPN drop
+# right after this play costs nothing. Run the check phase later (>= 30 min, ideally after
+# disconnecting) to see what survived.
+- name: Refuse to overwrite a spike that is still running
+  ansible.builtin.stat:
+    path: "{{ spike_dir }}/heartbeat.pid"
+  register: _spike_pid
+
+- name: Stop if a previous spike exists
+  ansible.builtin.fail:
+    msg: >-
+      {{ spike_dir }} already holds a spike. Run -e spike_phase=check -e spike_cleanup=true
+      first, then start again.
+  when: _spike_pid.stat.exists
+
+- name: Create the spike directory
+  ansible.builtin.file:
+    path: "{{ spike_dir }}"
+    state: directory
+    mode: "0700"
+
+- name: Render the spike scripts
+  ansible.builtin.template:
+    src: "{{ item }}.sh.j2"
+    dest: "{{ spike_dir }}/{{ item }}.sh"
+    mode: "0700"
+  loop: [probe, heartbeat, cell, finalize, check]
+
+- name: Probe the login node
+  ansible.builtin.shell: bash -l "{{ spike_dir }}/probe.sh" login > "{{ spike_dir }}/login.json"
+  changed_when: true
+
+- name: Start the detached heartbeat (it must outlive this SSH session)
+  # setsid + nohup + closed fds: the same pattern dl2l's image_ccad uses for long builds.
+  # Never on a cluster whose policy forbids long-running login-node processes (CCAD).
+  when: expkit_login_daemons_allowed | default(false) | bool
+  ansible.builtin.shell: >-
+    setsid nohup bash "{{ spike_dir }}/heartbeat.sh"
+    > /dev/null 2>&1 < /dev/null &
+  changed_when: true
+
+- name: Submit the array job and its afterany finalize job
+  when: expkit_scheduler == 'slurm'
+  block:
+    - name: Submit the two-task array job
+      ansible.builtin.command:
+        argv: [sbatch, --parsable, "{{ spike_dir }}/cell.sh"]
+        chdir: "{{ spike_dir }}"
+      register: _spike_array
+      changed_when: true
+
+    - name: Submit the finalize job, to start only after every array task ends
+      ansible.builtin.command:
+        argv:
+          - sbatch
+          - --parsable
+          - "--dependency=afterany:{{ _spike_array.stdout | regex_search('^[0-9]+') }}"
+          - "--export=ALL,ARRAY_ID={{ _spike_array.stdout | regex_search('^[0-9]+') }}"
+          - "{{ spike_dir }}/finalize.sh"
+        chdir: "{{ spike_dir }}"
+      register: _spike_finalize
+      changed_when: true
+
+    - name: Record the job ids
+      ansible.builtin.copy:
+        content: "array={{ _spike_array.stdout }}\nfinalize={{ _spike_finalize.stdout }}\n"
+        dest: "{{ spike_dir }}/jobs.txt"
+        mode: "0600"
+
+- name: Say what to do next
+  ansible.builtin.debug:
+    msg: >-
+      Spike started on {{ expkit_env }}. Disconnect (or let the VPN drop), wait at least
+      30 minutes, then run the same command with -e spike_phase=check.

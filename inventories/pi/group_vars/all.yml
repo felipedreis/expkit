@@ -1,0 +1,20 @@
+---
+# Raspberry Pi SLURM + Docker cluster. Moved from dl2l's ansible/inventories/pi; the
+# dl2l-specific variables (image name, config dir) stay in dl2l's expkit.yml.
+expkit_env: pi
+expkit_scheduler: slurm
+expkit_container_runtime: docker
+
+# Private registry on the controller, and the filesystem every node mounts at the same path.
+registry: "192.168.1.200:5000"
+shared_fs: /mnt/dl2l-shared
+expkit_remote_root: "{{ shared_fs }}/expkit"
+# Our own hardware: cron and detached processes on the controller are fine.
+expkit_login_daemons_allowed: true
+
+# The SSH user with passwordless sudo docker access on every node (the user dl2l's
+# scripts/run_exp_p7_pi.sh assumed). Override with -e ansible_user=... if it differs.
+ansible_user: felipeduarte
+
+# Extra sbatch options for every job. The Pi cluster has one default partition.
+expkit_slurm_opts: []

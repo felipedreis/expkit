@@ -1,0 +1,39 @@
+#!/bin/bash
+# {{ ansible_managed | default('Rendered by roles/spike, do not edit.') }}
+# Prints one JSON object describing what this node can do. Run on the login node and, via
+# SLURM, on compute nodes. Usage: probe.sh <role>
+set -u
+out="{"
+add() { local v; v=$(printf '%s' "$2" | tr '\n\t' '  ' | tr -d '"\\'); out+="\"$1\": \"$v\", "; }
+first() { "$@" 2>&1 | head -n1; }
+
+add role "${1:-login}"
+add host "$(hostname)"
+add time_utc "$(date -u +%FT%TZ)"
+add slurm_job "${SLURM_JOB_ID:-}"
+for tool in python3 sbatch singularity apptainer docker curl ansible-playbook; do
+  if command -v "$tool" >/dev/null 2>&1; then add "ver_$tool" "$(first "$tool" --version)"
+  else add "ver_$tool" "missing"; fi
+done
+{% if not (expkit_login_daemons_allowed | default(false) | bool) %}
+add crontab "not probed (cluster policy forbids cron)"
+{% else %}
+if ! command -v crontab >/dev/null 2>&1; then add crontab "missing"
+elif crontab -l >/dev/null 2>&1; then add crontab "allowed (has entries)"
+else
+  msg=$(crontab -l 2>&1 | head -n1)
+  case "$msg" in
+    *"no crontab"*) add crontab "allowed (empty)" ;;
+    *) add crontab "denied: $msg" ;;
+  esac
+fi
+{% endif %}
+if command -v scontrol >/dev/null 2>&1; then
+  add slurm_mail "$(scontrol show config 2>/dev/null | grep -i -E '^ *Mail(Prog|Domain)' | sed 's/  */ /g' | paste -sd';' -)"
+else add slurm_mail "no scontrol"; fi
+add module_cmd "$(type -t module || echo missing)"
+{% for h in spike_hosts %}
+add "https_{{ h }}" "$(curl -sS -o /dev/null -m {{ spike_curl_timeout }} -w '%{http_code}' https://{{ h }}/ 2>/dev/null || true)"
+{% endfor %}
+add disk_free_home "$(df -h "$HOME" 2>/dev/null | awk 'NR==2 {print $4 " free of " $2}')"
+printf '%s\n' "${out%, }}"

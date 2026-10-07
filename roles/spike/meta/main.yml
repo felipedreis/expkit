@@ -1,0 +1,10 @@
+---
+galaxy_info:
+  author: felipedreis
+  description: Phase 0 spike. Probe what a runner environment allows before relying on it.
+  license: LicenseRef-proprietary
+  min_ansible_version: "2.16"
+  platforms:
+    - name: GenericLinux
+      versions: [all]
+dependencies: []

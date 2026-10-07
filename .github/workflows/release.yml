@@ -1,0 +1,32 @@
+name: release
+
+# Push a tag vX.Y.Z to publish. The package, the collection and the plugin share one version,
+# so the tag must match all three (tests/test_versions.py keeps them equal to each other).
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -e '.[dev]' build
+      - name: Check the tag matches the version
+        run: |
+          version=$(python -c 'import expkit; print(expkit.__version__)')
+          test "v${version}" = "${GITHUB_REF_NAME}" \
+            || { echo "tag ${GITHUB_REF_NAME} != package version ${version}"; exit 1; }
+      - run: pytest -q
+      - run: python -m build --outdir dist
+      - run: ansible-galaxy collection build --output-path dist
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${GITHUB_REF_NAME}" dist/* --generate-notes --title "${GITHUB_REF_NAME}"

@@ -1,0 +1,48 @@
+---
+# Moved from dl2l's ansible/inventories/ccad. Only facts about the cluster live here; what a
+# project's trials need (CPUs, memory, JVM heap) goes in that project's expkit.yml.
+expkit_env: ccad
+expkit_scheduler: slurm
+expkit_container_runtime: singularity
+expkit_remote_root: ""            # $HOME/expkit (shared NFS, visible on compute nodes)
+
+# CCAD policy: no cron and no long-running or detached user processes on the login node.
+# expkit therefore never starts anything there that outlives the SSH command that ran it:
+# completion is signalled by SLURM's own job-end email (sent by the controller, so it needs
+# neither the login node nor internet on the compute nodes), and data is pulled from a
+# machine on the CEFET VPN. NOTE: dl2l's image_ccad role (moving here in Phase 1) launches a
+# detached build script on the login node; it has to change before it moves.
+expkit_login_daemons_allowed: false
+
+# CPU partitions for simulations. CONFIRMED LIVE (dl2l): each CPU partition requires its
+# own qos; a job sent to `short` with the account's default dev_qos pends forever ("Job's
+# QOS not permitted to use this partition").
+ccad_sim_partition: short
+ccad_sim_qos: short_qos
+
+# GPU partition, for training only: 4x NVIDIA L40S across c1/c2, max 2 GPUs per user,
+# 2-day cap.
+ccad_gpu_partition: gpu
+ccad_gpu_qos: gpu_qos
+
+# Extra sbatch options for every job submitted by expkit on this cluster.
+expkit_slurm_opts:
+  - "--partition={{ ccad_sim_partition }}"
+  - "--qos={{ ccad_sim_qos }}"
+
+# Comma-separated nodes to avoid, per invocation: -e ccad_exclude_nodes=c8
+ccad_exclude_nodes: ""
+
+# The conda env provision-ccad creates once on shared NFS (compute nodes have no internet,
+# so nothing may be installed at job run time).
+ccad_conda_env: expkit
+ccad_python_activate: "module load miniforge3 && conda activate {{ ccad_conda_env }}"
+
+# CCAD username (a CPF without punctuation, i.e. PII): taken from $CCAD_USERNAME, or from a
+# gitignored .env.local (CCAD_USERNAME=<cpf>) in the directory ansible-playbook runs from.
+# Never print it in a task or a report.
+expkit_env_file: "{{ lookup('ansible.builtin.env', 'PWD') }}/.env.local"
+ccad_user: >-
+  {{ lookup('ansible.builtin.env', 'CCAD_USERNAME', default='')
+     or ((lookup('ansible.builtin.file', expkit_env_file, errors='ignore') | default('', true))
+         | regex_findall('^CCAD_USERNAME=(.+)$', multiline=True) | first | default('', true)) }}

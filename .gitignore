@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.egg-info/
+dist/
+*.tar.gz
+.pytest_cache/
+.ruff_cache/
+# Holds CCAD_USERNAME (a CPF, i.e. PII) and cluster tokens. Never commit it.
+.env.local
+# Raw spike output can contain hostnames and usernames; commit only the verdict tables.
+spike-results/
+.ansible/

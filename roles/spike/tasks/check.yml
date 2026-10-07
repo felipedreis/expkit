@@ -1,0 +1,39 @@
+---
+- name: Gather what the start phase left behind
+  ansible.builtin.command: bash "{{ spike_dir }}/check.sh"
+  register: _spike_check
+  changed_when: false
+
+- name: Make the local results directory
+  delegate_to: localhost
+  ansible.builtin.file:
+    path: "{{ spike_results_dir }}"
+    state: directory
+    mode: "0700"
+
+- name: Write the raw results locally (gitignored; may contain host and user names)
+  delegate_to: localhost
+  ansible.builtin.copy:
+    content: "{{ _spike_check.stdout | from_json | to_nice_json }}\n"
+    dest: "{{ spike_results_dir }}/{{ expkit_env }}.json"
+    mode: "0600"
+
+- name: Point at the report
+  ansible.builtin.debug:
+    msg: >-
+      Wrote {{ spike_results_dir }}/{{ expkit_env }}.json. Turn it into verdicts with:
+      expkit spike-report {{ spike_results_dir }}/{{ expkit_env }}.json
+
+- name: Clean up the remote spike
+  when: spike_cleanup | bool
+  block:
+    - name: Stop the heartbeat if it is still running
+      ansible.builtin.shell: |
+        pid=$(cat "{{ spike_dir }}/heartbeat.pid" 2>/dev/null) || exit 0
+        kill "$pid" 2>/dev/null || true
+      changed_when: true
+
+    - name: Delete the spike directory
+      ansible.builtin.file:
+        path: "{{ spike_dir }}"
+        state: absent

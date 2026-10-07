@@ -1,0 +1,7 @@
+---
+expkit_env: local
+expkit_scheduler: none            # none | slurm
+expkit_container_runtime: docker  # docker | singularity
+# Where expkit keeps its working files on the runner. Empty means $HOME/expkit.
+expkit_remote_root: ""
+expkit_login_daemons_allowed: true

@@ -1,0 +1,74 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      matrix:
+        python: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: pip install -e '.[dev]'
+      - run: ruff check .
+      - run: ruff format --check .
+      - run: pytest -q
+
+  ansible:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      matrix:
+        # The `ansible` package pins one ansible-core and bundles community collections,
+        # ansible.posix included, so CI never waits on galaxy.ansible.com (it hung CI run 1).
+        include:
+          - {core: "2.16", ansible: "9"}
+          - {core: "2.17", ansible: "10"}
+    name: ansible (core ${{ matrix.core }})
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -e . "ansible~=${{ matrix.ansible }}.0" ansible-lint
+      - run: ansible --version | head -1 | grep -F "core ${{ matrix.core }}."
+      - run: ansible-lint --offline
+      - name: Syntax-check every playbook against every inventory
+        run: |
+          for inv in inventories/*/; do
+            for pb in playbooks/*.yml; do
+              ansible-playbook -i "$inv" "$pb" --syntax-check
+            done
+          done
+      - name: Run the spike end to end on the local inventory
+        run: |
+          ansible-playbook -i inventories/local playbooks/spike.yml \
+            -e spike_heartbeat_minutes=1 -e spike_heartbeat_interval=5
+          sleep 20
+          ansible-playbook -i inventories/local playbooks/spike.yml \
+            -e spike_phase=check -e spike_cleanup=true
+          expkit spike-report spike-results/local.json --interval 5 --planned-minutes 1 \
+            | tee report.md
+          grep -q "| Does a detached login-node process survive the SSH session? | \*\*yes\*\*" report.md
+      - run: ansible-galaxy collection build --output-path dist
+
+  plugin:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npx -y @anthropic-ai/claude-code plugin validate .
+      - run: npx -y @anthropic-ai/claude-code plugin validate ./plugin
