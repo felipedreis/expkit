@@ -32,10 +32,35 @@ def test_ccad_like_fixture():
     vs = by_question(spike.verdicts(FIXTURE))
     assert vs["Can the login node reach GitHub, HF and Anthropic"].answer == "yes"
     assert vs["Can compute nodes reach GitHub, HF and Anthropic"].answer == "no"
-    assert vs["Is cron allowed on the login node"].answer == "yes"
-    assert vs["Does a detached login-node process survive the SSH session"].answer == "yes"
+    # CCAD policy: these are never run there, and the report says so.
+    assert vs["Is cron allowed on the login node"].answer == "skipped"
+    assert vs["Does a detached login-node process survive"].answer == "skipped"
     dep = vs["Does an afterany dependency job start only after every array task ended"]
     assert dep.answer == "yes"
+    mail = vs["Does SLURM email when the finalize job ends"]
+    assert mail.answer == "check inbox"
+    assert "Job_id=4243" in mail.detail
+
+
+def test_daemon_tests_run_where_allowed():
+    raw = {
+        **FIXTURE,
+        "login_daemons_allowed": True,
+        "heartbeat": {"beats": 121, "first": 0, "last": 7200, "pid_alive": False},
+        "login": {**FIXTURE["login"], "crontab": "allowed (empty)"},
+    }
+    vs = by_question(spike.verdicts(raw))
+    assert vs["Does a detached login-node process survive the SSH session"].answer == "yes"
+    assert vs["Is cron allowed on the login node"].answer == "yes"
+
+
+def test_mail_not_requested():
+    assert spike.mail_verdict({"mail_requested": False}).answer == "skipped"
+
+
+def test_mail_without_mailprog():
+    raw = {"mail_requested": True, "login": {"slurm_mail": ""}}
+    assert spike.mail_verdict(raw).answer == "no"
 
 
 def test_heartbeat_killed_early():
@@ -85,7 +110,7 @@ def test_partial_hosts():
 def test_local_env_skips_slurm_questions():
     raw = {**FIXTURE, "scheduler": "none"}
     questions = [v.question for v in spike.verdicts(raw)]
-    assert not any("compute" in q or "afterany" in q for q in questions)
+    assert not any("compute" in q or "afterany" in q or "email" in q for q in questions)
 
 
 def test_cron_missing_is_no():

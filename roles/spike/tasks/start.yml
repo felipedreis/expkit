@@ -33,6 +33,8 @@
 
 - name: Start the detached heartbeat (it must outlive this SSH session)
   # setsid + nohup + closed fds: the same pattern dl2l's image_ccad uses for long builds.
+  # Never on a cluster whose policy forbids long-running login-node processes (CCAD).
+  when: expkit_login_daemons_allowed | default(false) | bool
   ansible.builtin.shell: >-
     setsid nohup bash "{{ spike_dir }}/heartbeat.sh"
     > /dev/null 2>&1 < /dev/null &

@@ -7,4 +7,5 @@ spike_heartbeat_interval: 60      # seconds between heartbeats
 spike_heartbeat_minutes: 120      # how long the detached process tries to live
 spike_cell_sleep: 30              # seconds each array task sleeps, so the dependency is visible
 spike_results_dir: "{{ lookup('ansible.builtin.env', 'PWD') }}/spike-results"
+spike_mail_user: ""               # e.g. -e spike_mail_user=you+expkit@gmail.com: SLURM emails it when finalize ends
 spike_cleanup: false              # check phase: also stop the heartbeat and delete the remote dir

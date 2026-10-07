@@ -81,6 +81,23 @@ def cron_verdict(login: dict) -> Verdict:
     return Verdict(q, "unknown", raw or "not probed")
 
 
+def mail_verdict(raw: dict) -> Verdict:
+    """SLURM sends job-end mail from the controller; only the inbox can confirm delivery."""
+    q = "Does SLURM email when the finalize job ends?"
+    if not raw.get("mail_requested"):
+        return Verdict(q, "skipped", "run the start phase with -e spike_mail_user=<address>")
+    config = (raw.get("login") or {}).get("slurm_mail", "")
+    if "mailprog" not in config.lower():
+        return Verdict(q, "no", f"SLURM has no MailProg configured ({config or 'nothing found'})")
+    job = raw.get("finalize_job") or "<finalize job id>"
+    return Verdict(
+        q,
+        "check inbox",
+        f"{config}. Look for 'Slurm Job_id={job} Name=expkit_spike_finalize Ended'; "
+        "note whether it arrived, how late, and whether it went to spam",
+    )
+
+
 def dependency_verdict(sacct_lines: list[str], finalize_done: bool) -> Verdict:
     q = "Does an afterany dependency job start only after every array task ended?"
     if not finalize_done:
@@ -99,12 +116,19 @@ def verdicts(raw: dict, interval_s: int = 60, planned_s: int = 7200) -> list[Ver
     out = [
         _hosts_verdict(
             "Can the login node reach GitHub, HF and Anthropic?", [login] if login else []
-        ),
-        heartbeat_verdict(
-            {**(raw.get("heartbeat") or {}), "now": raw.get("now")}, interval_s, planned_s
-        ),
-        cron_verdict(login),
+        )
     ]
+    if raw.get("login_daemons_allowed", True):
+        out.append(
+            heartbeat_verdict(
+                {**(raw.get("heartbeat") or {}), "now": raw.get("now")}, interval_s, planned_s
+            )
+        )
+        out.append(cron_verdict(login))
+    else:
+        policy = "not tested: cluster policy forbids login-node daemons and cron"
+        out.append(Verdict("Does a detached login-node process survive?", "skipped", policy))
+        out.append(Verdict("Is cron allowed on the login node?", "skipped", policy))
     if raw.get("scheduler") == "slurm":
         out.append(
             _hosts_verdict(
@@ -112,6 +136,7 @@ def verdicts(raw: dict, interval_s: int = 60, planned_s: int = 7200) -> list[Ver
             )
         )
         out.append(dependency_verdict(raw.get("sacct") or [], bool(raw.get("finalize_done"))))
+        out.append(mail_verdict(raw))
     return out
 
 

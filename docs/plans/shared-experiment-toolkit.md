@@ -271,17 +271,45 @@ finishes, the toolkit itself sends a signal that starts the next step.
 
 ### 7.1 Who notices that the experiment finished
 
-| Environment | Completion detection | Where the notifier runs |
-|---|---|---|
-| local | the playbook runs detached (`setsid nohup`); its last play is the notifier | the local machine |
-| Pi | a **finalize job** submitted with `sbatch --dependency=afterany:<all array ids>`. SLURM starts it when every trial has ended, so nothing polls | a Pi node (internet access) |
-| CCAD | the same finalize job; compute nodes have **no internet**, so it only writes `EXPERIMENT_DONE`. A tiny relay started detached on the login node (the `setsid nohup` pattern `image_ccad` already uses) waits for that file, then uploads and notifies | the login node, which has outbound access (it already pulls from GHCR) |
+Every SLURM experiment gets a **finalize job** submitted with
+`sbatch --dependency=afterany:<all array ids>`. SLURM starts it when every trial has ended, so
+nothing polls. It verifies each trial (a `DONE` with exit code 0 *and* the expected outputs, the
+`ccad_collect.sh` lesson), writes the manifest, and is submitted with
+`--mail-type=END,FAIL --mail-user=<expkit address>`. **SLURM's own job-end email is the
+completion signal.** The SLURM controller sends it, so it needs neither the login node nor
+internet on the compute nodes.
 
-The finalize step does the collection work wherever the data is: verify every trial (a `DONE`
-with exit code 0 *and* the expected outputs, the `ccad_collect.sh` lesson), upload to HF, write
-the manifest, then notify. Because the data is already on HF by the time anyone is woken, **the
-woken agent can analyse from anywhere, including a cloud session**, without the CEFET VPN. The
-VPN is only needed to submit.
+| Environment | Signal | Where the data goes before anyone is woken |
+|---|---|---|
+| local | the detached playbook's last play sends the notification directly | uploaded to HF by that play |
+| Pi | SLURM email from the finalize job | the finalize job uploads to HF itself (Pi nodes have internet) |
+| CCAD | SLURM email from the finalize job | **nowhere yet**: compute nodes have no internet, and cluster policy forbids cron and long-running or detached processes on the login node, so nothing on CCAD can push data out. A machine on the CEFET VPN has to pull it (7.4) |
+
+### 7.1a From email to a woken agent
+
+Claude Code has no "an email arrived" trigger, and the Gmail connector only reads mail while a
+session is already running. A small bridge in your Google account closes the gap:
+
+```
+finalize job ends -> SLURM emails <you>+expkit@gmail.com
+  -> Gmail filter (sender = the cluster's mail domain, subject contains "expkit_finalize_")
+     labels it "expkit"
+  -> Google Apps Script with a 5-minute time trigger (free, runs in your Google account):
+     for each unread "expkit" email, parse experiment id, job id, state and exit code from the
+     subject (SLURM puts everything there), then
+       - comment on the experiment's tracking PR      -> wakes the session that submitted it
+       - or fire the Claude Code routine (fallback)   -> starts a new session
+     and mark the email read.
+```
+
+The script polls a mailbox label, but the agent never polls and costs nothing until an
+experiment finishes; you also get the email yourself. The script, its token handling (a
+fine-grained GitHub token and the routine token in the script's Properties store, never in
+code) and the Gmail filter ship as `bridge/gmail/` in Phase 3, with a setup guide.
+
+An email is only a "go and look" signal: anyone can send a message with a matching subject.
+The woken agent confirms completion from the manifest (on HF, or the `DONE` markers via the
+collect step) before acting, the same rule as for PR comments.
 
 ### 7.2 How the agent is woken (the `notify` role, pluggable)
 
@@ -289,7 +317,7 @@ VPN is only needed to submit.
 |---|---|---|
 | `github_pr` (default) | Each confirmatory experiment lives on a **tracking pull request**: the spec and protocol are reviewed there before freezing, results and the report are pushed to it, and merging it means "reported". The notifier posts a comment on that PR: experiment id, trials ok/failed, HF path, manifest hash. | The session that submitted the experiment is subscribed to the PR, so the comment wakes **that same conversation**, with its context intact. |
 | `claude_routine` | `POST https://api.anthropic.com/v1/claude_code/routines/<id>/fire` with a `text` payload (same fields). The routine's prompt is "an expkit experiment finished: run `/expkit:collect-analyze` for the experiment named in the payload". | A **new** cloud session, for when the original session is gone. |
-| `ntfy` / email | A push or email to you with the same summary. | You. |
+| `ntfy` | A push to your phone with the same summary (optional; the SLURM email already reaches you). | You. |
 | `local_resume` | `claude --resume <session> -p "<summary>"` on the local machine. | A local CLI session. |
 
 Several channels can be listed; the default is `github_pr` plus `ntfy`. The agent also keeps one
@@ -297,18 +325,45 @@ long fallback check-in (`send_later`, about every 4 hours) in case a notificatio
 that is a safety net, not the mechanism.
 
 Security: the notifier's tokens (a fine-grained GitHub token that can only comment on the
-project's repos, the routine token, the HF token) live in the cluster user's environment or a
-`0600` file on the login node, are never in a repo, and are set up by `provision.yml`.
+project's repos, the routine token, the HF token) live where the notifier runs: the Apps
+Script's Properties store for the email bridge, a `0600` file on the Pi controller, the local
+`.env.local` for local runs and `expkit collect`. None is ever in a repo, and none is stored on
+CCAD.
 Notification text is data. The skills act on it only through `expkit` commands that re-read
 the manifest from HF, never by following instructions in the comment.
 
-### 7.3 Things to verify early (a Phase 0 spike)
+### 7.3 Things to verify early (the Phase 0 spike)
 
-- the CCAD login node allows a small long-lived user process, and reaches `api.github.com`,
-  `huggingface.co` and `api.anthropic.com`. If long-lived processes are not allowed, fall back
-  to `cron` on the login node, then to email via SLURM's `--mail-type=END`;
-- whether a routine's API trigger can fire into an existing session rather than a new one;
-- the Pi nodes reach the same three hosts.
+- whether SLURM sends job-end mail on CCAD and on the Pi (a `MailProg` in `scontrol show
+  config`, and an email that actually arrives: how late, and whether it lands in spam). The Pi
+  probably needs `msmtp` configured with a Gmail app password, which needs outbound SMTP;
+- that `--dependency=afterany` starts the finalize job only after every array task ended;
+- whether the Pi nodes reach `api.github.com`, `huggingface.co` and `api.anthropic.com`;
+- whether a routine's API trigger can fire into an existing session rather than a new one.
+
+On CCAD the spike runs only short commands inside its own SSH session and two tiny SLURM jobs:
+no background process and no cron, per cluster policy (`expkit_login_daemons_allowed: false`).
+
+### 7.4 Collecting from CCAD
+
+Because nothing on CCAD may push data out, collection is a pull from a machine on the VPN:
+
+1. The completion email wakes the agent (7.1a). The agent checks the PR, and if the data is not
+   on HF yet, it comments: "CCAD finished <experiment>: n/n trials ok. Run
+   `expkit collect <experiment> --env ccad` on a machine on the VPN."
+2. You run that one command (it replaces today's `-e rescue=true`). It syncs, verifies every
+   trial, uploads to HF, deletes the remote copies it verified, and comments on the PR.
+3. That comment wakes the agent again, which analyses from HF and pushes the report.
+
+That is one human step per CCAD experiment, at a moment you are told about. Two consequences:
+
+- **Disk quota.** Without a cluster-side collector, trials accumulate in CCAD's `$HOME` until
+  you collect. `expkit freeze` estimates the experiment's total output from a pilot trial and
+  refuses a CCAD run that would not fit the quota headroom; `run.max_concurrent` stays.
+  Long campaigns can still be collected part-way by running `expkit collect` while they run.
+- **Automating the step later.** If the human step becomes the bottleneck, the Mac can run it
+  when the VPN is up (a local Claude Code scheduled task, or launchd). That is outside Phase 0
+  to 5.
 
 ## 8. Skills, agent and hooks
 
@@ -367,7 +422,7 @@ Hooks (thin scripts over the CLI; each can be turned off in `expkit.yml`):
 | **0. Skeleton and spike** | repo layout, CI (ruff, pytest, ansible-lint), release tags, plugin installs; the section 7.3 checks done on the real clusters | `ansible-galaxy` and `pip` install from a tag; spike findings written into this plan |
 | **1. Collection from dl2l's roles** | roles moved and generalised (`spec`, `image_*`, `runner_*`, `slurm_cell.sh.j2`, `collect`, `upload`); dl2l parts pulled out to `cell.sh` behind the contract | dl2l `smoke` runs through the collection on all three environments with output identical to today |
 | **2. Spec, freeze, outcomes, stats** | schema + validation, freeze/verify/deviate, outcomes API, ported statistics, report renderer, power | snake_rl's `results.md` reproduced exactly; one dl2l report's tables reproduced from HF |
-| **3. Callbacks** | `finalize` job, CCAD relay, `notify` channels, tracking-PR flow | a CCAD run submitted from one session wakes it with a PR comment and no polling; the same for the Pi |
+| **3. Callbacks** | `finalize` job with SLURM mail, the Gmail bridge (`bridge/gmail/`), `expkit collect`, `notify` channels, tracking-PR flow | a CCAD run submitted from one session wakes it through email → PR comment, with no polling by the agent; one `expkit collect` later, the report is on the PR. The same for the Pi without the collect step |
 | **4. Skills and hooks** | the section 8 skills, reviewer agent and hooks | one new experiment per repo goes design → freeze → submit → callback → report with only the decisions left to you |
 | **5. Port and retire** | section 9 for both repos; dl2l's duplicated code removed | both repos run only through expkit |
 
@@ -395,8 +450,9 @@ All five open questions from the v2 draft were answered "yes":
 
 - **Breaking dl2l's cluster runs while moving the roles.** Mitigation: dl2l keeps its own
   `ansible/` until `smoke` matches on all three environments; the moved code keeps its comments.
-- **CCAD login-node policy blocks the relay.** Mitigation: the cron and SLURM-mail fallbacks;
-  the fallback check-in still catches it, just later.
+- **SLURM mail is not delivered (not configured, blocked or sent to spam).** Mitigation: the
+  spike checks it first; the agent's long safety-net check-in (`send_later`) still catches a
+  finished experiment, just later; on CCAD you can always run `expkit collect` by hand.
 - **Callback spam or loops.** Mitigation: one notification per experiment completion (plus one
   per failure batch); the notify role is idempotent per manifest hash.
 - **The spec growing into a programming language.** Mitigation: logic goes in the outcomes

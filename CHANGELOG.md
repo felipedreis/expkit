@@ -10,7 +10,9 @@ Phase 0 of `docs/plans/shared-experiment-toolkit.md`:
   Code plugin and marketplace.
 - Inventories for local, the Raspberry Pi cluster and CCAD, moved from dl2l (cluster facts only).
 - `playbooks/spike.yml` and `expkit spike-report`: check what each environment allows
-  (outbound HTTPS from login and compute nodes, detached processes, cron, SLURM afterany).
+  (SLURM job-end email, SLURM afterany, outbound HTTPS from login and compute nodes; on
+  clusters that allow it, detached login-node processes and cron). CCAD's policy forbids
+  login-node daemons and cron, so the spike never starts either there.
 - `expkit doctor`: check the control machine (Python, ansible-core, outbound HTTPS).
 - `spike` skill.
 - CI (ruff, pytest, ansible-lint, playbook syntax checks, an end-to-end local spike, plugin

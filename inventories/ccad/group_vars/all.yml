@@ -6,6 +6,14 @@ expkit_scheduler: slurm
 expkit_container_runtime: singularity
 expkit_remote_root: ""            # $HOME/expkit (shared NFS, visible on compute nodes)
 
+# CCAD policy: no cron and no long-running or detached user processes on the login node.
+# expkit therefore never starts anything there that outlives the SSH command that ran it:
+# completion is signalled by SLURM's own job-end email (sent by the controller, so it needs
+# neither the login node nor internet on the compute nodes), and data is pulled from a
+# machine on the CEFET VPN. NOTE: dl2l's image_ccad role (moving here in Phase 1) launches a
+# detached build script on the login node; it has to change before it moves.
+expkit_login_daemons_allowed: false
+
 # CPU partitions for simulations. CONFIRMED LIVE (dl2l): each CPU partition requires its
 # own qos; a job sent to `short` with the account's default dev_qos pends forever ("Job's
 # QOS not permitted to use this partition").

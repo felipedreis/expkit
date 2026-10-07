@@ -5,15 +5,20 @@ nobody has checked yet. This spike checks them before Phase 3 builds on them.
 
 | # | Question | Why it matters |
 |---|---|---|
-| 1 | Can the **login node** reach `api.github.com`, `huggingface.co`, `api.anthropic.com`? | The CCAD relay uploads to HF and posts the callback from there. |
-| 2 | Can **compute nodes** reach them? | If yes (expected on the Pi), the finalize job notifies by itself, with no relay. |
-| 3 | Does a **detached login-node process** survive the SSH session and the VPN dropping? | The relay is such a process. |
-| 4 | Is **cron** allowed on the login node? | Fallback for the relay if 3 is "no". |
-| 5 | Does an **`afterany` dependency job** start only after every array task ended? | That job is how completion is detected without polling. |
-| 6 | Can a **routine's API trigger** wake an *existing* session, or only start a new one? | Decides whether `claude_routine` can replace `github_pr` as the default callback. |
-| 7 | Does a **PR comment posted with your token** wake a session subscribed to that PR? | The default callback (`github_pr`) relies on it. |
+| 1 | Does **SLURM send job-end email** (and does it arrive, how late, not in spam)? | SLURM's email from the finalize job is the completion signal on every cluster. |
+| 2 | Does an **`afterany` dependency job** start only after every array task ended? | That finalize job is how completion is detected without polling. |
+| 3 | Can **compute nodes** reach `api.github.com`, `huggingface.co`, `api.anthropic.com`? | If yes (expected on the Pi), the finalize job uploads to HF itself. On CCAD we expect no. |
+| 4 | Can the **login node** reach them? | Recorded for completeness; nothing on CCAD's login node runs after our SSH command returns. |
+| 5 | Pi only: does a **detached process** survive, and is **cron** allowed on the controller? | Our own hardware, so these are options there. Never tested on CCAD (policy). |
+| 6 | Can a **routine's API trigger** wake an *existing* session, or only start a new one? | Decides the fallback channel of the email bridge. |
+| 7 | Does a **PR comment posted with your token** wake a session subscribed to that PR? | The email bridge's default action relies on it. |
 
-Questions 1 to 5 are answered by `playbooks/spike.yml`; 6 and 7 by the manual steps below.
+Questions 1 to 5 are answered by `playbooks/spike.yml` (plus your inbox for question 1); 6 and
+7 by the manual steps below.
+
+**CCAD policy:** no cron and no long-running or detached processes on the login node. The
+CCAD inventory sets `expkit_login_daemons_allowed: false`, so there the spike runs only short
+commands inside its own SSH session plus two tiny SLURM jobs.
 
 ## Prerequisites (on the machine you run Ansible from)
 
@@ -33,9 +38,12 @@ For CCAD: connect to the CEFET VPN, and either `export CCAD_USERNAME=<cpf>` or p
 Run for `pi` and `ccad` (and `local` if you like; it skips the SLURM questions):
 
 ```sh
-ansible-playbook -i inventories/ccad playbooks/spike.yml                   # start; returns at once
-# disconnect, let the VPN drop, wait at least 30 minutes (the heartbeat runs for 2 h)
-ansible-playbook -i inventories/ccad playbooks/spike.yml -e spike_phase=check
+ansible-playbook -i inventories/ccad playbooks/spike.yml \
+  -e spike_mail_user=<you>+expkit@gmail.com                               # start; returns at once
+# wait for the "Slurm Job_id=... Name=expkit_spike_finalize Ended" email (note when it arrives),
+# or 30 minutes if it never comes; on the Pi, also disconnect so the heartbeat test means something
+ansible-playbook -i inventories/ccad playbooks/spike.yml -e spike_phase=check \
+  -e spike_mail_user=<you>+expkit@gmail.com
 expkit spike-report spike-results/ccad.json                               # verdict table
 ansible-playbook -i inventories/ccad playbooks/spike.yml -e spike_phase=check -e spike_cleanup=true
 ```
@@ -44,11 +52,15 @@ ansible-playbook -i inventories/ccad playbooks/spike.yml -e spike_phase=check -e
 the verdict tables under "Findings" below.
 
 What the start phase leaves on the cluster, under `$HOME/expkit/spike` (CCAD) or
-`/mnt/dl2l-shared/expkit/spike` (Pi): the rendered scripts, `login.json`, a heartbeat that
-appends a timestamp every 60 s for 2 h, a 2-task array job (1 CPU, 512 MB, under 10 min) and
-a finalize job that depends on it. On CCAD both jobs go to `short` / `short_qos`.
+`/mnt/dl2l-shared/expkit/spike` (Pi): the rendered scripts, `login.json`, a 2-task array job
+(1 CPU, 512 MB, under 10 min) and a finalize job that depends on it and emails you when it
+ends. On CCAD both jobs go to `short` / `short_qos`. On the Pi only, it also starts a heartbeat
+that appends a timestamp every 60 s for 2 h.
 
 ## Question 6: routine API trigger into an existing session
+
+Already set up: the routine `expkit spike: callback test` (`trig_01H28pQS4UzFQVrhacubPHm6`) is
+bound to the Phase 0 session, so skip step 1.
 
 1. In the Claude Code session that should be woken, ask Claude to create a poke-only routine
    bound to that session ("expkit spike: callback"). Note its `trig_...` id.

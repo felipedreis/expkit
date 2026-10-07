@@ -9,6 +9,8 @@ expkit_container_runtime: docker
 registry: "192.168.1.200:5000"
 shared_fs: /mnt/dl2l-shared
 expkit_remote_root: "{{ shared_fs }}/expkit"
+# Our own hardware: cron and detached processes on the controller are fine.
+expkit_login_daemons_allowed: true
 
 # The SSH user with passwordless sudo docker access on every node (the user dl2l's
 # scripts/run_exp_p7_pi.sh assumed). Override with -e ansible_user=... if it differs.

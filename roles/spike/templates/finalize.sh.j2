@@ -5,6 +5,10 @@
 #SBATCH --job-name=expkit_spike_finalize
 #SBATCH --nodes=1 --ntasks=1 --cpus-per-task=1 --mem=512M --time=00:05:00
 #SBATCH --output={{ spike_dir }}/finalize_%j.out
+{% if spike_mail_user %}
+#SBATCH --mail-type=END,FAIL
+#SBATCH --mail-user={{ spike_mail_user }}
+{% endif %}
 {% for opt in expkit_slurm_opts | default([]) %}
 #SBATCH {{ opt }}
 {% endfor %}
