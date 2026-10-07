@@ -1,0 +1,14 @@
+#!/bin/bash -l
+# {{ ansible_managed | default('Rendered by roles/spike, do not edit.') }}
+# Submitted with --dependency=afterany:<array job>. Records what sacct says about the array at
+# the moment this job starts: every task should already be in a terminal state.
+#SBATCH --job-name=expkit_spike_finalize
+#SBATCH --nodes=1 --ntasks=1 --cpus-per-task=1 --mem=512M --time=00:05:00
+#SBATCH --output={{ spike_dir }}/finalize_%j.out
+{% for opt in expkit_slurm_opts | default([]) %}
+#SBATCH {{ opt }}
+{% endfor %}
+: "${ARRAY_ID:?pass --export=ALL,ARRAY_ID=<array job id>}"
+sacct -j "$ARRAY_ID" -X -n -P -o JobID,State,End > "{{ spike_dir }}/sacct.txt" 2>&1
+bash "{{ spike_dir }}/probe.sh" finalize > "{{ spike_dir }}/finalize.json"
+touch "{{ spike_dir }}/FINALIZE_DONE"

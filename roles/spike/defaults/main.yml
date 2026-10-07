@@ -1,0 +1,10 @@
+---
+# start: launch every probe and return at once. check: gather what they left behind.
+spike_phase: start
+spike_hosts: [api.github.com, huggingface.co, api.anthropic.com, ghcr.io, ntfy.sh]
+spike_curl_timeout: 10
+spike_heartbeat_interval: 60      # seconds between heartbeats
+spike_heartbeat_minutes: 120      # how long the detached process tries to live
+spike_cell_sleep: 30              # seconds each array task sleeps, so the dependency is visible
+spike_results_dir: "{{ lookup('ansible.builtin.env', 'PWD') }}/spike-results"
+spike_cleanup: false              # check phase: also stop the heartbeat and delete the remote dir

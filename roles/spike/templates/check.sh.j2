@@ -1,0 +1,24 @@
+#!/bin/bash
+# {{ ansible_managed | default('Rendered by roles/spike, do not edit.') }}
+# Gathers everything the start phase left behind into one JSON object on stdout.
+d="{{ spike_dir }}"
+json_or_null() { if [ -s "$1" ]; then cat "$1"; else echo null; fi; }
+hb="$d/heartbeat.log"
+beats=$( [ -f "$hb" ] && wc -l < "$hb" | tr -d ' ' || echo 0)
+first=$( [ -s "$hb" ] && head -n1 "$hb" || echo null)
+last=$( [ -s "$hb" ] && tail -n1 "$hb" || echo null)
+pid=$(cat "$d/heartbeat.pid" 2>/dev/null)
+alive=false; [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && alive=true
+
+printf '{"env": "{{ expkit_env }}", "scheduler": "{{ expkit_scheduler }}", "now": %s, ' "$(date +%s)"
+printf '"heartbeat": {"beats": %s, "first": %s, "last": %s, "pid_alive": %s}, ' "$beats" "$first" "$last" "$alive"
+printf '"login": %s, ' "$(json_or_null "$d/login.json")"
+printf '"compute": ['
+sep=""; for f in "$d"/compute_*.json; do [ -s "$f" ] || continue; printf '%s%s' "$sep" "$(cat "$f")"; sep=", "; done
+printf '], "finalize": %s, ' "$(json_or_null "$d/finalize.json")"
+printf '"finalize_done": %s, ' "$( [ -f "$d/FINALIZE_DONE" ] && echo true || echo false)"
+printf '"sacct": ['
+sep=""; [ -f "$d/sacct.txt" ] && while IFS= read -r line; do
+  printf '%s"%s"' "$sep" "$(printf '%s' "$line" | tr -d '"\\')"; sep=", "
+done < "$d/sacct.txt"
+printf ']}\n'

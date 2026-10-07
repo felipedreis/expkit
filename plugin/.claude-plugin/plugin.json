@@ -1,0 +1,10 @@
+{
+  "name": "expkit",
+  "version": "0.1.0",
+  "description": "Declarative, pre-registered experiments from hypothesis to report, on local, Raspberry Pi SLURM and HPC SLURM environments.",
+  "author": {
+    "name": "felipedreis",
+    "url": "https://github.com/felipedreis"
+  },
+  "repository": "https://github.com/felipedreis/expkit"
+}

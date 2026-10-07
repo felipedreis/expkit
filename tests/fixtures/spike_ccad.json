@@ -1,0 +1,21 @@
+{
+  "env": "ccad",
+  "scheduler": "slurm",
+  "now": 1760000000,
+  "heartbeat": {"beats": 121, "first": 1759992800, "last": 1759999990, "pid_alive": false},
+  "login": {
+    "role": "login", "host": "login01", "crontab": "allowed (empty)",
+    "ver_sbatch": "slurm 23.02.7", "ver_singularity": "singularity-ce version 4.1.0",
+    "https_api.github.com": "200", "https_huggingface.co": "200", "https_api.anthropic.com": "404",
+    "https_ghcr.io": "301", "https_ntfy.sh": "200"
+  },
+  "compute": [
+    {"role": "compute", "host": "c5", "https_api.github.com": "000", "https_huggingface.co": "000",
+     "https_api.anthropic.com": "000"},
+    {"role": "compute", "host": "c6", "https_api.github.com": "000", "https_huggingface.co": "000",
+     "https_api.anthropic.com": "000"}
+  ],
+  "finalize": {"role": "finalize", "host": "c5"},
+  "finalize_done": true,
+  "sacct": ["4242_1|COMPLETED|2026-10-07T10:01:02", "4242_2|COMPLETED|2026-10-07T10:01:03"]
+}

@@ -1,0 +1,15 @@
+{
+  "name": "expkit",
+  "description": "The expkit experiment toolkit for Claude Code",
+  "owner": {
+    "name": "felipedreis",
+    "url": "https://github.com/felipedreis"
+  },
+  "plugins": [
+    {
+      "name": "expkit",
+      "source": "./plugin",
+      "description": "Skills and hooks that drive the expkit CLI and Ansible collection"
+    }
+  ]
+}

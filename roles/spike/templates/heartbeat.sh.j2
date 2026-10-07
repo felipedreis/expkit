@@ -1,0 +1,11 @@
+#!/bin/bash
+# {{ ansible_managed | default('Rendered by roles/spike, do not edit.') }}
+# Started detached (setsid nohup) on the login node. If cluster policy reaps long-lived user
+# processes, or they die with the SSH session, the heartbeat log stops growing early.
+echo $$ > "{{ spike_dir }}/heartbeat.pid"
+end=$(( $(date +%s) + {{ spike_heartbeat_minutes }} * 60 ))
+while [ "$(date +%s)" -lt "$end" ]; do
+  date +%s >> "{{ spike_dir }}/heartbeat.log"
+  sleep {{ spike_heartbeat_interval }}
+done
+date +%s >> "{{ spike_dir }}/heartbeat.log"

@@ -1,6 +1,7 @@
 # Plan: expkit, a shared experiment toolkit for dl2l, snake_rl and later repos
 
-Status: **draft v2, awaiting approval**. v1 is in git history. v2 changes direction on three
+Status: **v2 approved 2026-10-07; Phase 0 in progress** (skeleton done, environment spike
+ready to run: see `docs/spike/README.md`). v1 is in git history. v2 changes direction on three
 points the review asked for:
 
 1. **Reuse the Ansible infrastructure.** dl2l's roles for the local machine, the Raspberry Pi
@@ -374,20 +375,21 @@ Phase 1 comes before the spec work on purpose: moving the roles is the riskiest 
 cluster lessons), and doing it first, with dl2l's current spec format, keeps dl2l working at every
 step. Phase 2 can start in parallel on the Python side.
 
-## 11. Open questions
+## 11. Decisions (2026-10-07)
 
-1. **Tracking PR per experiment.** Proposed as the default callback target and the experiment's
-   lifecycle record. It adds one PR per experiment to each repo. Alternatively, an issue per
-   experiment could be used, but issue comments do not wake a session the way PR events do.
-2. **Where notifier tokens live on CCAD and the Pi.** Proposed: a `0600` file in the cluster
-   user's home, written once by `provision.yml` from your local `.env.local`. OK?
-3. **snake_rl data store.** Its own HF dataset `felipedreis/snake-rl-experiments`, or one shared
-   dataset with a prefix per project?
-4. **dl2l seeding.** Adding a seed to the simulator is a code change in dl2l's core. Should it
-   be its own dl2l issue ahead of the port?
-5. **Python and Ansible baseline.** Python 3.11+, ansible-core 2.16+ on the control machine;
-   numpy, scipy, pandas, pyyaml, pydantic, plus `huggingface_hub` and `duckdb` as extras. Does
-   CCAD's conda environment take that?
+All five open questions from the v2 draft were answered "yes":
+
+1. **One tracking PR per experiment** is the default callback target and the experiment's
+   lifecycle record (spec and protocol reviewed there, results and report pushed there, merge
+   means "reported").
+2. **Notifier tokens** live on each cluster in a `0600` file in the cluster user's home,
+   written once by provisioning from the local `.env.local`.
+3. **snake_rl data** goes to its own HF dataset, `felipedreis/snake-rl-experiments`.
+4. **dl2l seeding** is its own dl2l issue, done before the port:
+   [felipedreis/dl2l#95](https://github.com/felipedreis/dl2l/issues/95).
+5. **Baseline:** Python 3.11+ and ansible-core 2.16+ on the control machine; numpy, scipy,
+   pandas, pyyaml, pydantic, with `huggingface_hub` and `duckdb` as extras. The spike records
+   what CCAD's conda environment actually has.
 
 ## 12. Risks
 

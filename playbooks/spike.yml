@@ -1,0 +1,12 @@
+---
+# Phase 0 spike: find out what each environment allows before the toolkit relies on it
+# (docs/plans/shared-experiment-toolkit.md, section 7.3; how to run: docs/spike/README.md).
+#
+#   ansible-playbook -i inventories/ccad playbooks/spike.yml                       # start
+#   ansible-playbook -i inventories/ccad playbooks/spike.yml -e spike_phase=check  # >= 30 min later
+#   expkit spike-report spike-results/ccad.json
+- name: Spike the runner environment
+  hosts: runner
+  gather_facts: false
+  roles:
+    - role: spike
