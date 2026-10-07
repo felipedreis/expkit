@@ -1,365 +1,404 @@
-# Plan: a shared experiment toolkit (skills, scripts, hooks, tools) used across repos
+# Plan: expkit, a shared experiment toolkit for dl2l, snake_rl and later repos
 
-Status: **draft, awaiting approval**. Nothing has been built yet and no new repository has been
-created.
+Status: **draft v2, awaiting approval**. v1 is in git history. v2 changes direction on three
+points the review asked for:
 
-## 1. Why
+1. **Reuse the Ansible infrastructure.** dl2l's roles for the local machine, the Raspberry Pi
+   cluster and CCAD become a shared Ansible collection, instead of being rewritten in Python.
+2. **One reproducible setup for both projects.** Each project supplies only a small, fixed
+   contract (section 4). snake_rl then runs on the Pi and CCAD with the same roles as dl2l.
+   dl2l gets snake_rl's rigour: hypotheses written as configuration and checked by code.
+3. **Callbacks instead of polling.** When results are ready, the toolkit wakes the agent
+   (section 7), so nobody, human or model, has to keep checking on jobs.
 
-There are two experimental workflows today, and each has half of what we want.
+## 1. What each repo brings today
 
 | | dl2l | snake_rl |
 |---|---|---|
 | Declarative spec | `experiments/<name>.yml`: conditions, trials, image, extract, upload, analysis module | none; the design is prose in `PROTOCOL.md` plus a bash `run.sh` |
-| Hypotheses / assumptions | prose in the report, written after the run (dev cycle step 5) | **pre-registered** in `PROTOCOL.md` (direction, rationale, pilot effect), frozen with SHA-256 hashes before any confirmatory run |
-| Sample size | `stats.required_n`, used ad hoc | rough power section in the protocol |
-| Execution | Ansible: local docker-compose, Pi (SLURM + Docker), CCAD (SLURM + Singularity, submit/rescue with `DONE` sentinels) | `xargs -P 8` over `snake-run` on one machine |
-| Collection | `dl2l_data.extract` (Arrow → DuckDB → Parquet) + `manifest.json` | JSON per run under `results/`, committed to git |
-| Storage | HuggingFace dataset `felipedreis/dl2l-experiments`, always uploaded | git only |
-| Analysis | `dl2l_analysis` (Kruskal-Wallis + Bonferroni MWU, Cliff's delta, survival) + per-experiment `run(cfg)` | one-off `analyze.py`: exact permutation tests, Holm, bootstrap CIs, Hedges' g, decision rule |
-| Report | `ReportBuilder`: Purpose / Assumptions / Hypothesis / Results / Analysis | `REPORT.md`: recap, verdict table, deviations, limitations, hash check |
+| Hypotheses and rigour | written in the report, after the run | **pre-registered**: directional hypotheses with rationale and pilot effect; protocol, `run.sh` and `analyze.py` frozen by SHA-256 before any confirmatory run; exact permutation tests, Holm, bootstrap CIs, Hedges' g, a fixed decision rule; deviations reported |
+| Seeds | none: the simulator's randomness is unseeded, so a trial cannot be re-run identically | explicit seeds, disjoint from the pilot's |
+| Execution | Ansible on 3 environments: local docker compose; Pi (SLURM + Docker); CCAD (SLURM + Singularity, submit then rescue, `DONE` sentinels, ports derived from job ids, image digest check, incremental collection under disk quota) | `xargs -P 8` on one machine |
+| Collection and storage | Arrow → DuckDB → Parquet + `manifest.json`; always uploaded to HF `felipedreis/dl2l-experiments` | JSON per run committed to git |
+| Analysis and report | `dl2l_analysis` (Kruskal-Wallis + Bonferroni MWU, Cliff's delta, ICC, survival) + `ReportBuilder` | one-off `analyze.py` + hand-written `REPORT.md` |
 
-The goal is one toolkit, in its own repo, that any project can adopt. It should take an
-experiment from a declarative definition (question, hypotheses, assumptions, design) through
-running, collecting, analysing and storing, to a report, with the same conventions everywhere.
-It should keep the strengths of both: dl2l's environment-agnostic execution and guaranteed data
-preservation, and snake_rl's pre-registration discipline.
+The Ansible roles encode months of live-cluster findings (qos per partition, the unique port
+range per job, the sandbox rebuild race, `delegate_to` needing `ansible_connection: ssh`, the
+async polling that hangs over the VPN, the disk quota). The plan keeps all of that and only
+moves the dl2l-specific parts out.
 
-## 2. What we ship, and how
+## 2. What expkit ships
 
-One repo (working name **`felipedreis/expkit`**, see open question Q1) holding two things that
-version together:
+One repo, three parts that version together under one tag:
 
-1. **A Python package, `expkit`** (CLI + library). It holds everything deterministic: schema
-   validation, freezing, power analysis, run orchestration, collection, upload, statistics,
-   report rendering. Installed per project with
-   `pip install "expkit @ git+https://github.com/felipedreis/expkit@vX.Y.Z"` (pinned tag),
-   or run without installing via `uvx`.
-2. **A Claude Code plugin** (the same repo is also a plugin marketplace). It holds the skills,
-   hooks, slash commands and a reviewer subagent, which drive the CLI. Installed with
-   `/plugin marketplace add felipedreis/expkit` and then `/plugin install expkit`.
+| Part | Holds | Installed by |
+|---|---|---|
+| **Ansible collection `felipedreis.expkit`** | playbooks and roles for image, trials, collection, upload, notification; inventories for local, Pi and CCAD | `ansible-galaxy collection install git+https://github.com/felipedreis/expkit.git,vX.Y.Z` (pinned in each project's `requirements.yml`) |
+| **Python package `expkit`** | the deterministic parts: spec schema and validation, freeze and verify, power analysis, outcome evaluation, statistics, report rendering, the notifier, and a thin `expkit` CLI that calls `ansible-playbook` | `pip install "expkit @ git+https://github.com/felipedreis/expkit@vX.Y.Z"` |
+| **Claude Code plugin** | skills, hooks and a protocol-reviewer subagent that drive the CLI | `/plugin marketplace add felipedreis/expkit`, then `/plugin install expkit` |
 
-Rule of thumb: **anything that must give the same answer twice lives in the CLI; the skills only
-orchestrate, ask questions, and write prose.** Hooks call the CLI, so they never duplicate its
-logic.
+Rule of thumb: anything that must give the same answer twice lives in the collection or the
+package. Skills only orchestrate, ask questions and write prose. Hooks call the CLI.
 
 ```
 expkit/
-  .claude-plugin/
-    plugin.json            # plugin manifest
-    marketplace.json       # makes the repo installable as a marketplace
-  skills/                  # one dir per skill, SKILL.md + references (section 5)
-  agents/protocol-reviewer.md
-  hooks/hooks.json         # + hooks/*.py thin wrappers over the CLI (section 6)
-  src/expkit/
-    spec/                  # JSON Schema + pydantic models, validate, migrate
-    freeze.py              # hashing, provenance, verify
-    power.py               # analytic + simulation-based power
-    run/                   # backends: local, slurm (+ container wrappers), submit/rescue state
-    collect/               # artifact sync, manifest, extractor hook
-    store/                 # upload backends: huggingface (first), local
-    stats/                 # tests, corrections, effect sizes, CIs, decision rule
-    report/                # report model + markdown renderer + figure helpers
-    cli.py
-  envs/                    # shareable environment profiles: ccad.yml, pi.yml, local.yml
-  templates/               # new-experiment scaffolds (spec, analysis.py, report)
-  tests/                   # unit tests + golden tests against real past experiments
+  galaxy.yml                       # collection metadata
+  playbooks/
+    run_experiment.yml             # submit (and on local/Pi, wait); generalised from dl2l
+    collect.yml                    # was "-e rescue=true": sync, verify, upload, notify
+    provision.yml                  # per-env setup (from provision-pi.yml / provision-ccad.yml)
+  roles/
+    spec/                          # load + validate (calls `expkit validate`), apply defaults
+    image_local/ image_pi/ image_ccad/      # build / buildx arm64 + push / pull SIF + sandbox
+    runner_local/ runner_pi/ runner_ccad/   # cell matrix, SLURM arrays, sentinels, job-id state
+    finalize/                      # per-experiment completion job (section 7)
+    collect/                       # incremental sync + verify + cleanup (from ccad_collect.sh)
+    upload/                        # HF dataset upload + manifest
+    notify/                        # callback channels (section 7)
+    templates/slurm_cell.sh.j2     # generic SLURM wrapper around the project's cell entrypoint
+  inventories/{local,pi,ccad}/     # host facts shared by every project; no secrets
+  src/expkit/                      # Python package (spec, freeze, power, outcomes, stats, report, notify, cli)
+  .claude-plugin/{plugin.json,marketplace.json}
+  skills/  agents/  hooks/
+  templates/                       # scaffolds for `expkit adopt` and `expkit new`
+  tests/                           # unit, golden, and ansible-lint / molecule for roles
   docs/
 ```
 
-## 3. The experiment spec (the core of the design)
+## 3. One reproducible setup
 
-One YAML file per experiment. It merges dl2l's `experiments/<name>.yml` (the *how*) with
-snake_rl's `PROTOCOL.md` (the *why* and the *what counts as evidence*), so the protocol stops
-being prose that can drift from the code. Prose still has a place: free-text fields, and an
-optional `protocol.md` next to the spec that the spec links to and that gets frozen with it.
+Reproducible means: the same frozen spec, the same image digest and the same seeds give the
+same trial on any environment. Three decisions follow.
 
-Sketch, using the snake_rl MFEC experiment as the worked example:
+- **Every project runs from a container image, on every environment.** dl2l already does.
+  snake_rl gains a small `Dockerfile` (python-slim + numpy + the package) built by CI for
+  amd64 and arm64 and pushed to GHCR. The local machine and the Pi run it with Docker; CCAD
+  pulls it as a Singularity SIF through the existing `image_ccad` digest-checked sandbox flow. A
+  venv runtime stays available for quick local exploratory runs, but confirmatory runs need an
+  image.
+- **The freeze records the image digest, not a tag.** `latest` keeps moving; the frozen spec
+  pins `ghcr.io/...@sha256:...`. This replaces the "pin with `-e dl2l_image=`" convention with
+  something enforced.
+- **Every trial has an explicit seed.** The runner assigns `seed = seeds[trial]` from the
+  spec and passes it to the cell. snake_rl already accepts one. **dl2l does not seed its
+  randomness today**: `RandomPositionFactory` seeds from `System.currentTimeMillis()`, and
+  `RandomFilter`, `MemoryFilter`, `ActionProbabilityFilter` and `FullAppraisal` use self-seeding
+  `new Random()` (the filters already have seeded constructors for tests), so
+  porting dl2l includes a small change: a `seed` setting in the simulation config that seeds one
+  generator per actor system, derived per creature. Without it, dl2l results can be repeated
+  statistically but no single trial can be replayed. Akka's message scheduling stays
+  nondeterministic either way, so the honest claim for dl2l is "same seed, same initial
+  conditions and random streams", not "bit-identical runs". The report says so.
+
+## 4. The per-project contract (the minimum each project must provide)
+
+A project adopts expkit by adding **one manifest and three small pieces of code**. Nothing else
+in the toolkit knows anything about the project.
+
+### 4.1 `expkit.yml` at the project root
+
+```yaml
+project: snake_rl
+image:
+  name: ghcr.io/felipedreis/snake_rl      # CI builds and pushes; freeze pins the digest
+  build: docker/Dockerfile                # used by image_local / image_pi when source: build
+paths:
+  experiments: docs/experiments           # one dir per experiment: experiment.yml, protocol.md, report
+  data: data                              # local collected data (gitignored)
+cell:
+  entrypoint: expkit/cell.sh              # inside the image
+  resources: {cpus: 1, mem: 2G, time: "00:30:00"}   # defaults; a spec can override per condition
+  ports: 0                                # how many ports the cell needs (dl2l: 7)
+outcomes: snake_rl.expkit_outcomes        # Python module, section 4.3
+extract: null                             # optional, section 4.4
+store:
+  backend: huggingface
+  repo: felipedreis/snake-rl-experiments
+```
+
+### 4.2 The cell entrypoint: run one trial
+
+One executable that runs **one (condition, trial)** and exits. The runner calls it identically
+on every environment, with everything it needs in environment variables:
+
+| Variable | Meaning |
+|---|---|
+| `EXPKIT_EXPERIMENT`, `EXPKIT_CONDITION`, `EXPKIT_TRIAL` | identity of the cell |
+| `EXPKIT_SEED` | the trial's seed |
+| `EXPKIT_TRIAL_DIR` | where outputs must go; created by the runner |
+| `EXPKIT_PORT_BASE` | start of a port range reserved for this cell (from the job id; the CCAD fix, generalised) |
+| `EXPKIT_CPUS` | CPUs granted, so the cell can size thread pools and JVM flags |
+| `EXPKIT_P_<NAME>` | every parameter of the condition, e.g. `EXPKIT_P_AGENT=mfec`, `EXPKIT_P_SIMULATION=simulations/x.conf` |
+
+Contract: exit 0 on success, non-zero on failure; write only under `EXPKIT_TRIAL_DIR`. The
+runner owns everything around it: the SLURM array, the `DONE` sentinel with the exit code, the
+log file, teardown, retries, and provenance.
+
+- **snake_rl's cell** is about three lines: `snake-run "$EXPKIT_P_AGENT" "$EXPKIT_SEED" ... --results "$EXPKIT_TRIAL_DIR"`.
+- **dl2l's cell** is the bulk of today's `run_trial.sh.j2` and `dl2l_trial.sh.j2`, minus the
+  generic parts: start manager, detector and holder on `EXPKIT_PORT_BASE+n`, wait for the
+  holder, stop. The Singularity-versus-compose difference becomes a `runtime` switch inside
+  dl2l's cell, because a cell that needs several cooperating processes is a project concern.
+  The live-cluster notes in those templates move with that code.
+
+### 4.3 The outcomes module: turn one trial's outputs into numbers
+
+```python
+# snake_rl/expkit_outcomes.py
+from expkit.outcomes import outcome
+
+@outcome("late", unit="trial")
+def late(trial_dir, params):        # -> float
+    ...                             # mean score per episode in (S/2, S]
+
+@outcome("early", unit="trial")
+def early(trial_dir, params): ...
+```
+
+Each function maps one trial's directory to a number (or, with `unit="entity"`, to a table of
+one row per creature or episode, see section 5). Hypotheses refer to outcomes by name. This
+module is the only analysis code an experiment usually needs, and it is shared by all of a
+project's experiments rather than rewritten each time. dl2l's existing measures (survival time,
+behavioural efficiency, accumulated nutrients, and so on, now spread over `analysis/legacy/`
+and `analysis/experiments/`) become a dl2l outcomes registry.
+
+### 4.4 Optional extractor
+
+Runs on the cluster after the cell, before `DONE` is final: `extract: "python3 -m dl2l_data.extract ..."`. dl2l
+keeps its Arrow → Parquet step exactly as it is. snake_rl has none.
+
+That is the whole contract: **`expkit.yml`, a cell entrypoint, an outcomes module, an optional
+extractor**, plus the Dockerfile the project already has or adds.
+
+## 5. Hypotheses as configuration, checked by code
+
+The experiment spec merges dl2l's `experiments/<name>.yml` with snake_rl's `PROTOCOL.md`.
+Hypotheses are data that the engine evaluates, so the verdict table needs no hand-written code:
 
 ```yaml
 schema: expkit/v1
 id: mfec_dqn_nec
-title: MFEC vs DQN vs NEC on Snake
-status: draft            # draft -> frozen -> running -> collected -> analysed -> reported
-question: >
-  How does MFEC compare with DQN and NEC on final play quality, data efficiency,
-  robustness to noise channels, and a larger board?
+status: draft                     # draft -> frozen -> submitted -> collected -> analysed -> reported
+question: How does MFEC compare with DQN and NEC on Snake?
 
 design:
   factors:
-    agent:  [random, dqn, nec, mfec]
+    agent: [random, dqn, nec, mfec]
     config:
       C1: {size: 7,  distractors: 0, steps: 40000}
       C2: {size: 7,  distractors: 4, steps: 40000}
       C3: {size: 10, distractors: 0, steps: 60000}
-  cells: full_factorial    # or an explicit list of conditions (dl2l's style)
-  replication:
-    unit: run              # the unit of analysis
-    seeds: 101-110         # explicit, never reused from the pilot
-  labels:  {random: Random, dqn: DQN, nec: NEC, mfec: MFEC}
-  colors:  {dqn: "#2a78d6", nec: "#eb6834", mfec: "#1baf7a", random: "#8a8984"}
+  cells: full_factorial            # or an explicit `conditions:` list (dl2l's form)
+  seeds: 101-110                   # trials = len(seeds)
+  pilot_seeds: 1-5                 # validator rejects any overlap with seeds
 
 outcomes:
-  late:  {role: primary,   description: "mean score/episode, steps (S/2, S]"}
-  early: {role: primary,   description: "mean score/episode, steps (5k, 10k]"}
-  rate_late: {role: secondary, description: "fruit per 1000 steps, 2nd half"}
+  late:  {role: primary}
+  early: {role: primary}
+  rate_late: {role: secondary}
 
 hypotheses:
   - id: H1a
     where: {config: C1}
     outcome: late
-    claim: {a: {agent: mfec}, b: {agent: dqn}, direction: greater}
-    rationale: "States repeat often on a clean 7x7 board; episodic tables excel there."
-    pilot: {a: 1.54, b: 0.97, n: 5}
-  # ...
+    compare: {a: {agent: mfec}, b: {agent: dqn}}
+    direction: greater
+    rationale: States repeat often on a clean 7x7 board; episodic tables excel there.
+    pilot: {a: 1.54, b: 0.97, sd: 0.1, n: 5}
 
 assumptions:
-  - id: A1
-    text: "Runs with different seeds are independent samples."
-  # ...
+  - {id: A1, text: Runs with different seeds are independent samples.}
 
 analysis:
-  test: permutation_exact       # | mann_whitney | welch_t | kruskal+posthoc | logrank ...
+  test: permutation_exact          # | permutation_mc | mann_whitney | welch_t | kruskal_posthoc | logrank
   sides: two
-  correction: holm              # | bonferroni | none
+  correction: holm                 # over all confirmatory hypotheses
   alpha: 0.05
   effect_sizes: [mean_diff_bootstrap_ci, hedges_g]
-  decision_rule: directional    # supported / contradicted / not supported
+  decision: directional            # supported / contradicted / not supported
   missing: {rerun: 1, then: exclude_and_report}
-  power: {method: simulation, target: 0.8, from: pilot}
-  module: analysis.py           # project code: run outputs -> one row per run x outcome
+  power: {method: simulation, target: 0.8}
 
 run:
-  adapter: snake                # names an adapter in the project's expkit.toml (section 4)
-  parallel: 8
-  env_defaults: {OMP_NUM_THREADS: 1}
+  environments: [local, pi, ccad]  # where this spec is allowed to run
+  resources: {cpus: 1}
+  max_concurrent: 16               # the CCAD disk-quota lesson
 
-collect:
-  artifacts: "results/exp_mfec/**/*.json"
-
-store:
-  backend: huggingface
-  repo: felipedreis/snake-rl-experiments
-  prefix: mfec_dqn_nec
-  enabled: true                 # validator refuses false unless status is a smoke run
+notify: [github_pr, claude_routine]   # section 7
 ```
 
-Points worth calling out:
+What the code does with it:
 
-- **Hypotheses are data, not prose.** Each one names an outcome, a comparison, a direction and a
-  rationale. That lets the CLI compute power per hypothesis, build the verdict table, and apply
-  the decision rule without any per-experiment code. snake_rl's `HYPOTHESES` list in
-  `analyze.py` is exactly this, hand-written; we lift it into the spec.
-- **Conditions come from either a factorial or an explicit list.** dl2l's
-  `conditions: [{key, simulation, label, color}]` is the explicit-list form; snake_rl's
-  agent × config grid is the factorial form. Both lower to the same internal list of cells.
-- **Project-specific detail stays in the project.** The spec says *what* to run; how one cell
-  becomes a process is the project's adapter (section 4). The spec can carry arbitrary
-  per-cell parameters (`simulation:` for dl2l, `size`/`steps` for snake) that the adapter reads.
-- **`analysis.module`** is the only per-experiment code: it turns raw outputs into a tidy
-  table (one row per run, one column per outcome). Every test, correction, CI, figure and the
-  verdict table is generic from there.
-- **Migration from dl2l's schema is mechanical.** An `expkit spec migrate` command converts the
-  existing `experiments/*.yml` (adds empty `hypotheses`/`assumptions`/`outcomes`, marks them
-  `status: reported` and `legacy: true` so they aren't held to the freezing rules).
+- **`expkit validate`** checks that every hypothesis names a declared outcome and conditions
+  that exist, that the seeds do not overlap the pilot's, that `store` is enabled, and that the
+  outcomes module defines every outcome.
+- **`expkit power`** simulates each hypothesis under the declared test and correction, using
+  the pilot effect and spread, and proposes the number of seeds. This implements dl2l's dev
+  cycle step 5c ("choose the sample size by a statistical method").
+- **`expkit analyze`** computes every outcome for every trial (from the outcomes module), runs
+  the declared test per hypothesis, applies the correction and the decision rule, and writes
+  `results.json` plus the descriptives and verdict tables. Anything not declared in the spec
+  is labelled exploratory.
 
-## 4. Project integration: `expkit.toml` and adapters
+**The unit of analysis is explicit.** dl2l has many creatures per trial, and creatures in the
+same trial are not independent. An outcome declared with `unit: entity` is reduced to one
+number per trial by its declared `aggregate` (default: mean) before testing. Tests on the
+creatures themselves are only allowed with a clustered method (mixed model, or permutation of
+whole trials), and the report states the ICC and design effect, which `dl2l_analysis.stats`
+already computes. This is the main rigour change for dl2l: the engine makes the unit a
+declared, checked choice instead of a per-script habit, so a test can no longer count
+creatures as independent samples by accident.
 
-Each project adds one small file at its root, so the toolkit knows the local conventions:
+## 6. Freezing, provenance and deviations
 
-```toml
-[project]
-name = "dl2l"
-experiments_dir = "experiments"
-reports_dir = "docs/reports"
-figures_dir = "docs/reports/figures"
+`expkit freeze <id>` validates the spec, requires a clean git tree, resolves the image tag to a
+digest, and writes `FROZEN.json`: the UTC time, git commit, image digest, and SHA-256 of the
+spec, `protocol.md`, the outcomes module and the cell entrypoint. It sets `status: frozen`.
 
-[adapters.dl2l]
-# How one (condition, trial) cell becomes work. Templated with the cell's parameters.
-cell = "scripts/run-cell.sh --simulation {simulation} --trial {trial} --out {cell_dir}"
-container = "ghcr.io/felipedreis/dl2l:{image_tag}"   # optional
-extract = "python3 -m dl2l_data.extract --experiment {id} --condition {key} --trial {trial} --out {data_dir} --raw-dir {cell_dir}/raw"
+- `run_experiment.yml` refuses a confirmatory run unless the frozen hashes still match.
+  `-e exploratory=true` skips the check and marks everything that comes out of it as exploratory.
+- Changing a frozen file goes through `expkit deviate <id> "<reason>"`. That appends to a
+  deviations log, which the report prints verbatim.
+- Every collected trial gets provenance in `manifest.json`, extending dl2l's: spec hash, image
+  digest, environment, node, SLURM job id, seed, exit code, wall-clock time, and sizes of the
+  files it produced.
 
-[adapters.snake]
-cell = ".venv/bin/snake-run {agent} {seed} {steps} {distractors} {size} --results {cell_dir}"
-```
+## 7. Callbacks: results wake the agent
 
-That split is what makes the tool generic: dl2l's 469-line CCAD `run_trial.sh.j2` (four
-Singularity instances, port allocation, the live-cluster fixes it records) stays in dl2l as its
-cell script. expkit only owns what is the same for every project: fan out cells, run them on an
-environment, track them, collect them.
+The goal is that nobody polls. After submitting, the agent's turn ends. When the last trial
+finishes, the toolkit itself sends a signal that starts the next step.
 
-## 5. Execution backends and environments
+### 7.1 Who notices that the experiment finished
 
-**Recommendation: the run engine is Python, in expkit; Ansible stays in dl2l for provisioning
-(and, during migration, as the dl2l runner until parity is shown).** Reasons:
-
-- snake_rl has no need for Ansible, and the dynamic `include_role: "trial_runner_{{ dl2l_env }}"`
-  layer is already the most intricate part of dl2l's infra.
-- The generic parts of the CCAD flow (sbatch array per condition, persisted job ids,
-  `DONE` sentinels, rescue that is safe to repeat, sync-back, gating upload on all trials done)
-  are a few hundred lines of testable Python. The project-specific parts move into the cell
-  script anyway.
-
-Backends:
-
-| Backend | Covers | Mode |
+| Environment | Completion detection | Where the notifier runs |
 |---|---|---|
-| `local` | snake today; dl2l on the Mac via docker compose inside the cell script | blocking, process pool with `parallel: N` |
-| `slurm` | Pi cluster, CCAD | **submit / rescue**: `expkit run` submits and returns; `expkit rescue` checks sentinels, syncs back, and moves on once all cells are done. Safe to repeat. |
-| container wrapper | `docker` (local, Pi) or `singularity` (CCAD) around the cell | composes with either backend |
+| local | the playbook runs detached (`setsid nohup`); its last play is the notifier | the local machine |
+| Pi | a **finalize job** submitted with `sbatch --dependency=afterany:<all array ids>`. SLURM starts it when every trial has ended, so nothing polls | a Pi node (internet access) |
+| CCAD | the same finalize job; compute nodes have **no internet**, so it only writes `EXPERIMENT_DONE`. A tiny relay started detached on the login node (the `setsid nohup` pattern `image_ccad` already uses) waits for that file, then uploads and notifies | the login node, which has outbound access (it already pulls from GHCR) |
 
-Environment profiles (`envs/ccad.yml`, `envs/pi.yml`, `envs/local.yml`) carry the facts that are
-the same for every project on that machine: host, partition and qos pairs (`short`/`short_qos`,
-learned the hard way), CPU/memory defaults, shared FS paths, registry, container runtime. A
-project can override them in `expkit.toml`. **Secrets and PII never live there**: the CCAD
-username keeps coming from a gitignored `.env.local`, the HF token from the environment.
+The finalize step does the collection work wherever the data is: verify every trial (a `DONE`
+with exit code 0 *and* the expected outputs, the `ccad_collect.sh` lesson), upload to HF, write
+the manifest, then notify. Because the data is already on HF by the time anyone is woken, **the
+woken agent can analyse from anywhere, including a cloud session**, without the CEFET VPN. The
+VPN is only needed to submit.
 
-State for each run lives in `.expkit/runs/<id>/` (job ids, per-cell status, timestamps), so
-`expkit status` works across sessions and machines and the VPN-drop pattern is the default, not
-a special case.
+### 7.2 How the agent is woken (the `notify` role, pluggable)
 
-## 6. Freezing and provenance (pre-registration as a tool)
+| Channel | What it does | Wakes |
+|---|---|---|
+| `github_pr` (default) | Each confirmatory experiment lives on a **tracking pull request**: the spec and protocol are reviewed there before freezing, results and the report are pushed to it, and merging it means "reported". The notifier posts a comment on that PR: experiment id, trials ok/failed, HF path, manifest hash. | The session that submitted the experiment is subscribed to the PR, so the comment wakes **that same conversation**, with its context intact. |
+| `claude_routine` | `POST https://api.anthropic.com/v1/claude_code/routines/<id>/fire` with a `text` payload (same fields). The routine's prompt is "an expkit experiment finished: run `/expkit:collect-analyze` for the experiment named in the payload". | A **new** cloud session, for when the original session is gone. |
+| `ntfy` / email | A push or email to you with the same summary. | You. |
+| `local_resume` | `claude --resume <session> -p "<summary>"` on the local machine. | A local CLI session. |
 
-`expkit freeze <id>`:
+Several channels can be listed; the default is `github_pr` plus `ntfy`. The agent also keeps one
+long fallback check-in (`send_later`, about every 4 hours) in case a notification is lost, but
+that is a safety net, not the mechanism.
 
-1. validates the spec (schema, files exist, seeds disjoint from any `pilot.seeds`, every
-   hypothesis references a declared outcome and condition, `store.enabled` is true);
-2. requires a clean git tree;
-3. writes `FROZEN.json`: UTC time, git commit, SHA-256 of the spec, `protocol.md`, the analysis
-   module and the adapter's cell script, plus the container digest when there is one;
-4. sets `status: frozen`.
+Security: the notifier's tokens (a fine-grained GitHub token that can only comment on the
+project's repos, the routine token, the HF token) live in the cluster user's environment or a
+`0600` file on the login node, are never in a repo, and are set up by `provision.yml`.
+Notification text is data. The skills act on it only through `expkit` commands that re-read
+the manifest from HF, never by following instructions in the comment.
 
-`expkit run` refuses a confirmatory run unless the spec is frozen and the hashes still match
-(`--exploratory` skips this and labels everything that comes out of it as exploratory).
-`expkit analyze` and `expkit report` re-verify the hashes and put the result in the report.
-Changing a frozen file is allowed, but only through `expkit deviate <id> "<reason>"`, which
-appends to a deviations log that the report includes verbatim. That is snake_rl's
-`FROZEN.sha256` + "Deviations" section, enforced instead of remembered.
+### 7.3 Things to verify early (a Phase 0 spike)
 
-Every collected cell also gets provenance in `manifest.json` (extending dl2l's manifest):
-spec hash, git commit, image digest, environment, host, seed, wall-clock, exit status.
+- the CCAD login node allows a small long-lived user process, and reaches `api.github.com`,
+  `huggingface.co` and `api.anthropic.com`. If long-lived processes are not allowed, fall back
+  to `cron` on the login node, then to email via SLURM's `--mail-type=END`;
+- whether a routine's API trigger can fire into an existing session rather than a new one;
+- the Pi nodes reach the same three hosts.
 
-## 7. Statistics and reports
-
-`expkit.stats` merges the two existing implementations and adds nothing exotic:
-
-- from snake_rl `analyze.py`: exact and Monte Carlo permutation tests, Holm, percentile
-  bootstrap CIs, Hedges' g, the supported / contradicted / not-supported decision rule;
-- from dl2l `stats.py`: Kruskal-Wallis + Bonferroni Mann-Whitney, Cliff's delta, ICC and design
-  effect, `required_n`, Kaplan-Meier / log-rank;
-- `expkit power`: analytic where a closed form exists, otherwise simulation from pilot data
-  under the declared test and correction. This is how dev-cycle step 5c ("determine the sample
-  size through a statistical method") becomes one command.
-
-The report is generated from the spec plus results, with fixed sections that satisfy both
-repos' conventions:
-
-1. **Purpose** (question, from the spec)
-2. **Assumptions** (from the spec)
-3. **Hypotheses** (from the spec, with rationale and pilot)
-4. **Design and methods** (conditions, replication, tests, power; generated)
-5. **Results** (descriptives table, verdict table, figures; generated)
-6. **Analysis** (interpretation; written by the human or the `report` skill, never generated)
-7. **Deviations** (from the deviations log), **Limitations**, **Provenance** (hash check, data
-   location on HF, commit)
-
-Figures follow the existing palette-from-spec approach (`dl2l_analysis.figures`) and the
-`dataviz` conventions already used in snake_rl's learning-curve figure.
-
-## 8. Claude Code skills, agent and hooks
+## 8. Skills, agent and hooks
 
 Skills (namespaced `expkit:` once installed):
 
 | Skill | What it does |
 |---|---|
-| `design` | Interviews the user (question, mechanism, outcomes, what result would change their mind), drafts the spec and `protocol.md`, insists on directional hypotheses with rationale and on a pilot when effect sizes are unknown. Runs `expkit validate`. |
-| `power` | Runs `expkit power`, explains the result, proposes a trial count, records the reasoning in the spec. |
-| `review-protocol` | Hands the draft to the `protocol-reviewer` subagent: an adversarial reader looking for unfalsifiable or undirected hypotheses, seed reuse from the pilot, too many outcomes, underpowered tests, outcomes defined after looking at data, missing-data rules. |
-| `freeze` | Validates, freezes, commits the frozen files. |
-| `run` | Picks the environment, launches, and for SLURM explains the submit/rescue flow (and can schedule a check-in to rescue later). |
-| `status` | Lists every experiment and its lifecycle state, in-flight jobs, cells done/failed. |
-| `analyze` | Runs the frozen analysis; anything extra is labelled exploratory. |
-| `report` | Renders the generated sections and writes the Analysis/Limitations prose, keeping claims to what the verdict table supports. |
-| `publish` | Uploads data, verifies it landed on HF, links it from the report. |
-| `adopt` | One-time onboarding of a repo: writes `expkit.toml`, an adapter, CLAUDE.md lines, and migrates existing specs. |
+| `adopt` | One-time project onboarding: writes `expkit.yml`, a cell entrypoint and an outcomes module from what the repo already has, adds CLAUDE.md lines, migrates existing specs (marked `legacy: true`). |
+| `design` | Interviews you (question, mechanism, outcomes, what result would change your mind), drafts the spec and `protocol.md`, insists on directional hypotheses with a rationale, and on a pilot when effect sizes are unknown. Opens the tracking PR. |
+| `pilot` | Runs an exploratory pilot on disjoint seeds and fills in the `pilot:` fields. |
+| `power` | Runs `expkit power` and records the chosen number of seeds with its reasoning. |
+| `review-protocol` | Hands the draft to the `protocol-reviewer` subagent, an adversarial reader looking for undirected or unfalsifiable hypotheses, pilot-seed reuse, too many primary outcomes, underpowered tests, pseudo-replication (creatures treated as independent), and outcomes defined after looking at data. |
+| `freeze` | Validates, freezes and commits. |
+| `submit` | Picks the environment, runs the playbook, subscribes to the tracking PR, arms the fallback check-in, and **ends the turn**. |
+| `collect-analyze` | What a callback starts: verifies the manifest on HF, runs `expkit analyze`, renders the report, pushes to the tracking PR, and tells you the verdicts. |
+| `report` | Writes the Analysis and Limitations prose, keeping claims within the verdict table. |
+| `status` | Lists experiments by lifecycle state, with trials done or failed. |
 
-Hooks (each a thin script that calls the CLI; all can be disabled per project):
+Hooks (thin scripts over the CLI; each can be turned off in `expkit.yml`):
 
 | Event | Hook | Effect |
 |---|---|---|
-| `PreToolUse` Edit/Write | **frozen-guard** | Blocks edits to files listed in a `FROZEN.json` unless a matching deviation was logged; the block message says how to log one. |
-| `PostToolUse` Edit/Write on a spec | **validate-on-save** | Runs `expkit validate`, feeds errors back immediately. |
-| `PreToolUse` Bash | **data-preservation** | Blocks `rm -rf` of collected data dirs or raw dumps that `manifest.json` says were never uploaded. |
-| `SessionStart` | **in-flight summary** | One line per experiment that is running or waiting for rescue, so a new session knows CCAD jobs are pending. |
-| `Stop` | **lifecycle nudge** | If an experiment reached `analysed` this session without a report, says so once. |
+| `PreToolUse` Edit/Write | frozen-guard | Blocks edits to files listed in a `FROZEN.json` unless a matching deviation is logged; the message says how to log one. |
+| `PostToolUse` Edit/Write on a spec | validate-on-save | Runs `expkit validate` and returns the errors at once. |
+| `PreToolUse` Bash | data-preservation | Blocks deleting data directories or raw dumps that the manifest says were never uploaded. |
+| `SessionStart` | in-flight summary | One line per submitted experiment that is still running, so a new session knows. |
 
-## 9. Phases
+## 9. Porting each project
 
-Each phase ends with something usable and a concrete acceptance check. The strongest checks
-reuse past experiments as golden tests: if the new tool reproduces their numbers, it is right.
+**snake_rl** (smaller, so it goes first and proves the contract):
+1. Add the Dockerfile and a CI workflow publishing to GHCR (amd64 + arm64).
+2. Add `expkit.yml`, `expkit/cell.sh`, and `expkit_outcomes.py` (the `late`, `early` and
+   `rate_late` functions lifted from `analyze.py`).
+3. Write `mfec_dqn_nec` as a spec. Acceptance: `expkit analyze` over the existing
+   `results/exp_mfec` reproduces `results.md` and all seven verdicts exactly.
+4. Run a new small experiment on the Pi, then on CCAD, through the shared roles.
 
-**Phase 0: decisions and skeleton.** Answer the open questions; create the repo; plugin
-manifest, package skeleton, CI (lint, type check, tests), release tags.
-*Accept:* the plugin installs in a fresh session; `expkit --version` works from a pinned tag.
+**dl2l**:
+1. Add the seed setting (section 3), with a test that the same seed gives the same initial world
+   and the same random draws.
+2. Move the project-specific parts of `trial_runner_*` and `common/templates/docker-compose.yml.j2`
+   into `expkit/cell.sh` (with its compose and Singularity runtimes). Keep `dl2l_data.extract` as
+   the extractor.
+3. Build the outcomes registry from the measures in `analysis/legacy/` and
+   `analysis/experiments/`.
+4. Migrate the six `experiments/*.yml` as `legacy: true`, so they validate without hypotheses.
+5. Run `smoke` through the collection on local, Pi and CCAD. Acceptance: the Parquet tree matches
+   the current Ansible path for the same input, file for file (except for timestamps).
+6. Then remove dl2l's own `ansible/` roles, `validate_experiment.py`, and the parts of
+   `dl2l_analysis` that the package replaces, and update the CLAUDE.md dev cycle to the skills.
 
-**Phase 1: spec, validate, freeze.** JSON Schema + models, `validate`, `freeze`, `verify`,
-`deviate`, `spec migrate`; `design`, `review-protocol`, `freeze` skills; frozen-guard and
-validate-on-save hooks.
-*Accept:* snake_rl's `mfec_dqn_nec` written as a spec validates, and its existing hypotheses
-lower to the same list as `analyze.py`'s `HYPOTHESES`; all six dl2l specs migrate and validate.
+## 10. Phases
 
-**Phase 2: stats, power, report.** Port both stats modules, decision rule, report renderer,
-`power`, `analyze`, `report` skills.
-*Accept:* run against the existing `results/exp_mfec`, expkit reproduces snake_rl's
-`results.md` numbers exactly (same seeds, same RNG seed 0 for the bootstrap) and the same seven
-verdicts. One dl2l report's Kruskal/MWU table is reproduced from its HF data.
+| Phase | Delivers | Accepted when |
+|---|---|---|
+| **0. Skeleton and spike** | repo layout, CI (ruff, pytest, ansible-lint), release tags, plugin installs; the section 7.3 checks done on the real clusters | `ansible-galaxy` and `pip` install from a tag; spike findings written into this plan |
+| **1. Collection from dl2l's roles** | roles moved and generalised (`spec`, `image_*`, `runner_*`, `slurm_cell.sh.j2`, `collect`, `upload`); dl2l parts pulled out to `cell.sh` behind the contract | dl2l `smoke` runs through the collection on all three environments with output identical to today |
+| **2. Spec, freeze, outcomes, stats** | schema + validation, freeze/verify/deviate, outcomes API, ported statistics, report renderer, power | snake_rl's `results.md` reproduced exactly; one dl2l report's tables reproduced from HF |
+| **3. Callbacks** | `finalize` job, CCAD relay, `notify` channels, tracking-PR flow | a CCAD run submitted from one session wakes it with a PR comment and no polling; the same for the Pi |
+| **4. Skills and hooks** | the section 8 skills, reviewer agent and hooks | one new experiment per repo goes design → freeze → submit → callback → report with only the decisions left to you |
+| **5. Port and retire** | section 9 for both repos; dl2l's duplicated code removed | both repos run only through expkit |
 
-**Phase 3: run engine.** `local` and `slurm` backends, container wrappers, run state, `status`,
-`rescue`; env profiles for local, Pi, CCAD; `run`, `status` skills; SessionStart hook.
-*Accept:* a snake_rl sweep runs locally through expkit; a small snake_rl sweep runs on CCAD
-(pure Python, no containers: a cheap way to shake out the SLURM backend); then dl2l's `smoke`
-experiment runs on CCAD through its cell script, with submit/rescue.
+Phase 1 comes before the spec work on purpose: moving the roles is the riskiest step (the
+cluster lessons), and doing it first, with dl2l's current spec format, keeps dl2l working at every
+step. Phase 2 can start in parallel on the Python side.
 
-**Phase 4: collect and store.** Artifact sync, generic manifest with provenance, extractor
-hook, HF upload backend, `publish` skill, data-preservation hook.
-*Accept:* snake_rl's experiment is uploaded to an HF dataset and the report links it; a dl2l run
-through expkit produces a byte-identical Parquet tree to the Ansible path.
+## 11. Open questions
 
-**Phase 5: adopt both repos.** `adopt` skill; snake_rl moves to the spec (its `docs/experiments/`
-layout keeps working); dl2l runs experiments through expkit while the Ansible path stays
-available until two real experiments have gone through cleanly, then the duplicated code
-(`dl2l_analysis.stats/report/config`, `validate_experiment.py`, trial-runner roles) is removed
-and dl2l's CLAUDE.md dev cycle points at the skills.
-*Accept:* one new pre-registered experiment in each repo, done end to end with the toolkit.
+1. **Tracking PR per experiment.** Proposed as the default callback target and the experiment's
+   lifecycle record. It adds one PR per experiment to each repo. Alternatively, an issue per
+   experiment could be used, but issue comments do not wake a session the way PR events do.
+2. **Where notifier tokens live on CCAD and the Pi.** Proposed: a `0600` file in the cluster
+   user's home, written once by `provision.yml` from your local `.env.local`. OK?
+3. **snake_rl data store.** Its own HF dataset `felipedreis/snake-rl-experiments`, or one shared
+   dataset with a prefix per project?
+4. **dl2l seeding.** Adding a seed to the simulator is a code change in dl2l's core. Should it
+   be its own dl2l issue ahead of the port?
+5. **Python and Ansible baseline.** Python 3.11+, ansible-core 2.16+ on the control machine;
+   numpy, scipy, pandas, pyyaml, pydantic, plus `huggingface_hub` and `duckdb` as extras. Does
+   CCAD's conda environment take that?
 
-## 10. Open questions (need your call)
+## 12. Risks
 
-- **Q1. Repo name and visibility.** Proposed `felipedreis/expkit`, public (makes plugin and
-  `pip install git+...` simplest). Alternatives: `labkit`, `research-kit`; private works too but
-  needs a token in every environment that installs it.
-- **Q2. Execution engine.** Recommended above: Python run engine in expkit, Ansible kept only for
-  provisioning. The alternative is to publish the Ansible roles as a shared collection and make
-  snake_rl use Ansible too: less new code, but heavier for small Python projects.
-- **Q3. Data store for snake_rl.** Its results are in git today. Proposed: a separate HF dataset
-  (`felipedreis/snake-rl-experiments`), or a shared `felipedreis/experiments` dataset with one
-  prefix per project. Shared is simpler to browse; separate keeps access and size apart.
-- **Q4. How strict is pre-registration by default?** Proposed: confirmatory runs require a
-  freeze; `--exploratory` is always available and labels its outputs. dl2l's past experiments
-  never froze anything, so this is a real change in how dl2l works.
-- **Q5. Spec location in each repo.** Keep `experiments/<id>.yml` (dl2l) and allow a directory
-  form `docs/experiments/<id>/experiment.yml` (snake_rl, where protocol, report and figures sit
-  together)? Proposed: support both; the directory form is the default for new projects.
-- **Q6. Python baseline.** 3.11+ with pydantic, pyyaml, numpy, scipy, pandas, matplotlib;
-  `huggingface_hub` and `duckdb` as optional extras. Fine for CCAD's conda env?
-
-## 11. Risks
-
-- **Rewriting proven CCAD logic.** The live-cluster findings in dl2l's roles were expensive.
-  Mitigation: the project-specific half moves verbatim into dl2l's cell script; expkit only
-  takes the generic half; dl2l keeps the Ansible path until parity is shown on real runs.
-- **The spec growing into a programming language.** Mitigation: anything that needs logic goes
-  in the analysis module or the cell script; the schema only gets fields that the CLI acts on.
-- **Hooks getting in the way.** Mitigation: every hook is fast, has a clear message saying how
-  to proceed, and can be turned off in `expkit.toml`.
-- **Version skew across repos.** Mitigation: projects pin a tag in both `pip` and the plugin; the
-  spec carries `schema: expkit/v1` and `expkit spec migrate` handles upgrades.
+- **Breaking dl2l's cluster runs while moving the roles.** Mitigation: dl2l keeps its own
+  `ansible/` until `smoke` matches on all three environments; the moved code keeps its comments.
+- **CCAD login-node policy blocks the relay.** Mitigation: the cron and SLURM-mail fallbacks;
+  the fallback check-in still catches it, just later.
+- **Callback spam or loops.** Mitigation: one notification per experiment completion (plus one
+  per failure batch); the notify role is idempotent per manifest hash.
+- **The spec growing into a programming language.** Mitigation: logic goes in the outcomes
+  module or the cell; the schema only gets fields the code acts on.
+- **Version skew across repos.** Mitigation: each project pins one expkit tag for the
+  collection, package and plugin; specs carry `schema: expkit/v1`, and `expkit spec migrate`
+  handles upgrades.
